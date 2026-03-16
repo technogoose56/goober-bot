@@ -8,9 +8,8 @@ A simple Telegram bot built with Go that responds to greeting messages.
 2. Set your token as an environment variable:
    ```
    $env:TELEGRAM_BOT_TOKEN="your_bot_token_here"
-   `
-   or
    ```
+   or
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    ```
