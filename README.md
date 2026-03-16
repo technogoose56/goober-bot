@@ -1,6 +1,6 @@
 Goober Bot - Telegram Bot
 
-A simple Telegram bot built with Go that responds to greeting messages.
+A simple Telegram bot built with Go that responds to greeting and weather messages.
 
 ## Setup
 
@@ -21,10 +21,13 @@ A simple Telegram bot built with Go that responds to greeting messages.
 ## Features
 
 - Responds to "hi", "Hi", "/hi", and various greetings in different languages
-- Simply displays "Hi, I'm Goober Bot!"
+- Displays "Hi, I'm Goober Bot!"
+- Shows current weather information for Baltimore, MD
+- Fetches weather data from NOAA Weather API
 
 ## Usage
 
 1. Add the bot to your Telegram chat
 2. Send "hi" or any of the supported greetings
-3. The bot will automatically respond
+3. Type "/weather" to see current weather conditions
+4. The bot will automatically respond to your commands
