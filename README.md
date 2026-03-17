@@ -1,6 +1,6 @@
 Goober Bot - Telegram Bot
 
-A simple Telegram bot built with Go that responds to greeting and weather messages.
+A Telegram bot built with Go that provides weather updates and scheduled weather reports for Baltimore, MD.
 
 ## Setup
 
@@ -21,13 +21,44 @@ A simple Telegram bot built with Go that responds to greeting and weather messag
 ## Features
 
 - Responds to "hi", "Hi", "/hi", and various greetings in different languages
-- Displays "Hi, I'm Goober Bot!"
-- Shows current weather information for Baltimore, MD
-- Fetches weather data from NOAA Weather API
+- Shows current weather information for Baltimore, MD via `/weather`
+- Fetches weather data from the NOAA Weather API
+- Scheduled recurring weather updates with cron expressions
+- Schedules persist across bot restarts (SQLite database)
 
-## Usage
+## Commands
 
-1. Add the bot to your Telegram chat
-2. Send "hi" or any of the supported greetings
-3. Type "/weather" to see current weather conditions
-4. The bot will automatically respond to your commands
+| Command | Description |
+|---|---|
+| `/hi` | Bot responds with a greeting |
+| `/weather` | Shows current Baltimore weather conditions |
+| `/recurring-weather <cron>` | Set a recurring weather update schedule |
+| `/cancel-weather` | Cancel your scheduled weather updates |
+| `/weather-schedules` | View your active weather schedule |
+
+### Recurring Weather Examples
+
+```
+/recurring-weather 0 9 * * 1-5      Weekdays at 9:00 AM UTC
+/recurring-weather 0 8 * * *        Daily at 8:00 AM UTC
+/recurring-weather 30 6,18 * * *    Daily at 6:30 AM and 6:30 PM UTC
+```
+
+Cron expressions use the standard 5-field format: `minute hour day-of-month month day-of-week`.
+
+## Project Structure
+
+```
+main.go                           Entry point and update loop
+internal/
+  weather/weather.go              Weather API client and formatting
+  database/db.go                  SQLite persistence layer
+  scheduler/scheduler.go          Cron job management
+  commands/commands.go            Command parsing and handlers
+```
+
+## Running Tests
+
+```bash
+go test ./...
+```
