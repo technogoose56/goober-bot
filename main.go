@@ -106,8 +106,7 @@ func main() {
 				cfg := configForChat(db, chatID)
 				msg := weather.SendWeather(chatID, bot, cfg)
 				bot.Send(msg)
-			case text == "/hi" || text == "hi" || text == "Hi" ||
-				text == "Hola" || text == "Bonjour" || text == "Ciao":
+			case text == "/hi" || text == "hi" || text == "Hi":
 				msg := tgbotapi.NewMessage(chatID, "Hi, I'm Goober Bot!")
 				bot.Send(msg)
 			}
