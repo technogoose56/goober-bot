@@ -226,3 +226,127 @@ func TestUpdateLastRun(t *testing.T) {
 		t.Errorf("LastRun = %q, want %q", *s.LastRun, now.Format(time.RFC3339))
 	}
 }
+
+// --- UserConfig tests ---
+
+func TestGetUserConfigDefault(t *testing.T) {
+	db := openTestDB(t)
+
+	cfg, err := GetUserConfig(db, 800)
+	if err != nil {
+		t.Fatalf("GetUserConfig failed: %v", err)
+	}
+
+	def := DefaultConfig()
+	if cfg.StationCode != def.StationCode {
+		t.Errorf("StationCode = %q, want default %q", cfg.StationCode, def.StationCode)
+	}
+	if cfg.City != def.City {
+		t.Errorf("City = %q, want default %q", cfg.City, def.City)
+	}
+	if cfg.State != def.State {
+		t.Errorf("State = %q, want default %q", cfg.State, def.State)
+	}
+	if cfg.TimezoneName != def.TimezoneName {
+		t.Errorf("TimezoneName = %q, want default %q", cfg.TimezoneName, def.TimezoneName)
+	}
+	if cfg.TimezoneOffset != def.TimezoneOffset {
+		t.Errorf("TimezoneOffset = %d, want default %d", cfg.TimezoneOffset, def.TimezoneOffset)
+	}
+	if cfg.ChatID != 800 {
+		t.Errorf("ChatID = %d, want 800", cfg.ChatID)
+	}
+}
+
+func TestUpsertUserConfig(t *testing.T) {
+	db := openTestDB(t)
+
+	cfg := UserConfig{
+		ChatID:         900,
+		StationCode:    "KJFK",
+		City:           "New York",
+		State:          "NY",
+		TimezoneName:   "ET",
+		TimezoneOffset: -18000,
+	}
+
+	if err := UpsertUserConfig(db, cfg); err != nil {
+		t.Fatalf("UpsertUserConfig failed: %v", err)
+	}
+
+	got, err := GetUserConfig(db, 900)
+	if err != nil {
+		t.Fatalf("GetUserConfig failed: %v", err)
+	}
+	if got.StationCode != "KJFK" {
+		t.Errorf("StationCode = %q, want %q", got.StationCode, "KJFK")
+	}
+	if got.City != "New York" {
+		t.Errorf("City = %q, want %q", got.City, "New York")
+	}
+	if got.State != "NY" {
+		t.Errorf("State = %q, want %q", got.State, "NY")
+	}
+	if got.TimezoneOffset != -18000 {
+		t.Errorf("TimezoneOffset = %d, want %d", got.TimezoneOffset, -18000)
+	}
+}
+
+func TestUpsertUserConfigUpdate(t *testing.T) {
+	db := openTestDB(t)
+
+	cfg := UserConfig{
+		ChatID:         1000,
+		StationCode:    "KJFK",
+		City:           "New York",
+		State:          "NY",
+		TimezoneName:   "ET",
+		TimezoneOffset: -18000,
+	}
+	if err := UpsertUserConfig(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update just the station
+	cfg.StationCode = "KLGA"
+	cfg.City = "Queens"
+	if err := UpsertUserConfig(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := GetUserConfig(db, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StationCode != "KLGA" {
+		t.Errorf("StationCode = %q, want %q", got.StationCode, "KLGA")
+	}
+	if got.City != "Queens" {
+		t.Errorf("City = %q, want %q", got.City, "Queens")
+	}
+	// State should still be NY
+	if got.State != "NY" {
+		t.Errorf("State = %q, want %q", got.State, "NY")
+	}
+}
+
+func TestUserConfigIndependentPerChat(t *testing.T) {
+	db := openTestDB(t)
+
+	cfg1 := UserConfig{ChatID: 1100, StationCode: "KJFK", City: "New York", State: "NY", TimezoneName: "ET", TimezoneOffset: -18000}
+	cfg2 := UserConfig{ChatID: 1101, StationCode: "KLAX", City: "Los Angeles", State: "CA", TimezoneName: "PT", TimezoneOffset: -28800}
+
+	if err := UpsertUserConfig(db, cfg1); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertUserConfig(db, cfg2); err != nil {
+		t.Fatal(err)
+	}
+
+	got1, _ := GetUserConfig(db, 1100)
+	got2, _ := GetUserConfig(db, 1101)
+
+	if got1.StationCode != "KJFK" || got2.StationCode != "KLAX" {
+		t.Errorf("configs should be independent: got %q and %q", got1.StationCode, got2.StationCode)
+	}
+}

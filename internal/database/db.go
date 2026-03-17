@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     last_run        TEXT
 );
+
+CREATE TABLE IF NOT EXISTS user_config (
+    chat_id         INTEGER PRIMARY KEY,
+    station_code    TEXT    NOT NULL DEFAULT 'KBWI',
+    city            TEXT    NOT NULL DEFAULT 'Baltimore',
+    state           TEXT    NOT NULL DEFAULT 'MD',
+    timezone_name   TEXT    NOT NULL DEFAULT 'ET',
+    timezone_offset INTEGER NOT NULL DEFAULT -14400
+);
 `
 
 // Schedule represents a row in the schedules table.
@@ -28,6 +37,27 @@ type Schedule struct {
 	CronExpression string
 	CreatedAt      string
 	LastRun        *string
+}
+
+// UserConfig represents a row in the user_config table.
+type UserConfig struct {
+	ChatID         int64
+	StationCode    string
+	City           string
+	State          string
+	TimezoneName   string
+	TimezoneOffset int // seconds east of UTC
+}
+
+// DefaultConfig returns the default weather configuration (Baltimore, MD).
+func DefaultConfig() UserConfig {
+	return UserConfig{
+		StationCode:    "KBWI",
+		City:           "Baltimore",
+		State:          "MD",
+		TimezoneName:   "ET",
+		TimezoneOffset: -14400, // -4 hours in seconds
+	}
 }
 
 // Open opens (or creates) the SQLite database at the given path,
@@ -148,6 +178,45 @@ func UpdateLastRun(db *sql.DB, chatID int64, t time.Time) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update last_run: %w", err)
+	}
+	return nil
+}
+
+// GetUserConfig retrieves the config for the given chat.
+// If no config exists, returns the default config.
+func GetUserConfig(db *sql.DB, chatID int64) (UserConfig, error) {
+	var c UserConfig
+	err := db.QueryRow(
+		"SELECT chat_id, station_code, city, state, timezone_name, timezone_offset FROM user_config WHERE chat_id = ?",
+		chatID,
+	).Scan(&c.ChatID, &c.StationCode, &c.City, &c.State, &c.TimezoneName, &c.TimezoneOffset)
+
+	if err == sql.ErrNoRows {
+		cfg := DefaultConfig()
+		cfg.ChatID = chatID
+		return cfg, nil
+	}
+	if err != nil {
+		return UserConfig{}, fmt.Errorf("failed to get user config: %w", err)
+	}
+	return c, nil
+}
+
+// UpsertUserConfig inserts or updates the config for the given chat.
+func UpsertUserConfig(db *sql.DB, cfg UserConfig) error {
+	_, err := db.Exec(
+		`INSERT INTO user_config (chat_id, station_code, city, state, timezone_name, timezone_offset)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(chat_id) DO UPDATE SET
+		     station_code    = excluded.station_code,
+		     city            = excluded.city,
+		     state           = excluded.state,
+		     timezone_name   = excluded.timezone_name,
+		     timezone_offset = excluded.timezone_offset`,
+		cfg.ChatID, cfg.StationCode, cfg.City, cfg.State, cfg.TimezoneName, cfg.TimezoneOffset,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to upsert user config: %w", err)
 	}
 	return nil
 }

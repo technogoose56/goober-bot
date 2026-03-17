@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -12,9 +13,15 @@ import (
 	"goober-bot/internal/scheduler"
 )
 
+// MessageSender is an interface for sending Telegram messages.
+// *tgbotapi.BotAPI satisfies this interface.
+type MessageSender interface {
+	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
+}
+
 // Deps bundles the dependencies that command handlers need.
 type Deps struct {
-	Bot       *tgbotapi.BotAPI
+	Bot       MessageSender
 	Scheduler *scheduler.Scheduler
 	DB        *sql.DB
 }
@@ -29,8 +36,11 @@ func HandleCommand(text string, chatID int64, deps Deps) bool {
 	case text == "/cancel-weather":
 		handleCancelWeather(chatID, deps)
 		return true
-	case text == "/weather-schedules":
-		handleWeatherSchedules(chatID, deps)
+	case text == "/weather-schedule":
+		handleWeatherSchedule(chatID, deps)
+		return true
+	case text == "/weather-config" || strings.HasPrefix(text, "/weather-config "):
+		handleWeatherConfig(text, chatID, deps)
 		return true
 	default:
 		return false
@@ -85,7 +95,7 @@ func handleCancelWeather(chatID int64, deps Deps) {
 	reply(chatID, deps.Bot, "Schedule cancelled. You will no longer receive automatic weather updates.")
 }
 
-func handleWeatherSchedules(chatID int64, deps Deps) {
+func handleWeatherSchedule(chatID int64, deps Deps) {
 	sched, err := database.GetSchedule(deps.DB, chatID)
 	if err != nil {
 		reply(chatID, deps.Bot,
@@ -109,7 +119,145 @@ func handleWeatherSchedules(chatID int64, deps Deps) {
 		sched.CronExpression, sched.CreatedAt, lastRun, nextStr))
 }
 
-func reply(chatID int64, bot *tgbotapi.BotAPI, text string) {
+const weatherConfigUsage = `Usage: /weather-config <setting> <value>
+
+Settings:
+  station <code>                 NOAA station code (e.g., KJFK, KLAX, KORD)
+  city <name>                    City name for display
+  state <abbrev>                 State abbreviation (e.g., NY, CA, IL)
+  timezone <name> <offset_hours> Timezone label and UTC offset in hours
+                                 (e.g., ET -5, CT -6, PT -8)
+
+Examples:
+  /weather-config station KJFK
+  /weather-config city New York
+  /weather-config state NY
+  /weather-config timezone ET -5
+
+Send /weather-config with no arguments to view current settings.`
+
+func handleWeatherConfig(text string, chatID int64, deps Deps) {
+	rest := strings.TrimPrefix(text, "/weather-config")
+	args := strings.TrimSpace(rest)
+
+	// No arguments: show current config
+	if args == "" {
+		showConfig(chatID, deps)
+		return
+	}
+
+	fields := strings.Fields(args)
+	setting := strings.ToLower(fields[0])
+
+	switch setting {
+	case "station":
+		if len(fields) < 2 {
+			reply(chatID, deps.Bot, "Usage: /weather-config station <code>\nExample: /weather-config station KJFK")
+			return
+		}
+		code := strings.ToUpper(fields[1])
+		cfg, err := database.GetUserConfig(deps.DB, chatID)
+		if err != nil {
+			log.Printf("Failed to get user config for chat %d: %v", chatID, err)
+			reply(chatID, deps.Bot, "Failed to read current config.")
+			return
+		}
+		cfg.StationCode = code
+		if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Failed to save config: %v", err))
+			return
+		}
+		reply(chatID, deps.Bot, fmt.Sprintf("Station set to %q.\nWeather will now be fetched from https://api.weather.gov/stations/%s/observations/latest", code, code))
+
+	case "city":
+		if len(fields) < 2 {
+			reply(chatID, deps.Bot, "Usage: /weather-config city <name>\nExample: /weather-config city New York")
+			return
+		}
+		city := strings.Join(fields[1:], " ")
+		cfg, err := database.GetUserConfig(deps.DB, chatID)
+		if err != nil {
+			log.Printf("Failed to get user config for chat %d: %v", chatID, err)
+			reply(chatID, deps.Bot, "Failed to read current config.")
+			return
+		}
+		cfg.City = city
+		if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Failed to save config: %v", err))
+			return
+		}
+		reply(chatID, deps.Bot, fmt.Sprintf("City set to %q.", city))
+
+	case "state":
+		if len(fields) < 2 {
+			reply(chatID, deps.Bot, "Usage: /weather-config state <abbrev>\nExample: /weather-config state NY")
+			return
+		}
+		state := strings.ToUpper(fields[1])
+		cfg, err := database.GetUserConfig(deps.DB, chatID)
+		if err != nil {
+			log.Printf("Failed to get user config for chat %d: %v", chatID, err)
+			reply(chatID, deps.Bot, "Failed to read current config.")
+			return
+		}
+		cfg.State = state
+		if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Failed to save config: %v", err))
+			return
+		}
+		reply(chatID, deps.Bot, fmt.Sprintf("State set to %q.", state))
+
+	case "timezone":
+		if len(fields) < 3 {
+			reply(chatID, deps.Bot, "Usage: /weather-config timezone <name> <offset_hours>\nExample: /weather-config timezone ET -5")
+			return
+		}
+		tzName := fields[1]
+		offsetHours, err := strconv.ParseFloat(fields[2], 64)
+		if err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Invalid offset %q: must be a number (e.g., -5, 5.5).", fields[2]))
+			return
+		}
+		offsetSecs := int(offsetHours * 3600)
+
+		cfg, err := database.GetUserConfig(deps.DB, chatID)
+		if err != nil {
+			log.Printf("Failed to get user config for chat %d: %v", chatID, err)
+			reply(chatID, deps.Bot, "Failed to read current config.")
+			return
+		}
+		cfg.TimezoneName = tzName
+		cfg.TimezoneOffset = offsetSecs
+		if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Failed to save config: %v", err))
+			return
+		}
+		reply(chatID, deps.Bot, fmt.Sprintf("Timezone set to %s (UTC%+.0f).", tzName, offsetHours))
+
+	default:
+		reply(chatID, deps.Bot, weatherConfigUsage)
+	}
+}
+
+func showConfig(chatID int64, deps Deps) {
+	cfg, err := database.GetUserConfig(deps.DB, chatID)
+	if err != nil {
+		log.Printf("Failed to get user config for chat %d: %v", chatID, err)
+		reply(chatID, deps.Bot, "Failed to read config.")
+		return
+	}
+
+	offsetHours := float64(cfg.TimezoneOffset) / 3600.0
+	reply(chatID, deps.Bot, fmt.Sprintf(
+		"Current weather config:\n"+
+			"  Station:  %s\n"+
+			"  City:     %s\n"+
+			"  State:    %s\n"+
+			"  Timezone: %s (UTC%+.0f)",
+		cfg.StationCode, cfg.City, cfg.State, cfg.TimezoneName, offsetHours))
+}
+
+func reply(chatID int64, bot MessageSender, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Failed to send message to chat %d: %v", chatID, err)

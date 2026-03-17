@@ -288,42 +288,77 @@ has the following bugs that must be avoided:
 
 ```
 User:  /recurring-weather 0 9 * * 1-5
-Bot:   Schedule set: "0 9 * * 1-5" (weekdays at 9:00 AM UTC).
-       Next run: Mon Mar 18 09:00 AM.
+Bot:   Schedule set: "0 9 * * 1-5"
+       Next run: Mon Mar 18 09:00 AM UTC
 
 User:  /recurring-weather 0 8 * * *
-Bot:   Schedule updated: "0 8 * * *" (daily at 8:00 AM UTC).
-       Next run: Tue Mar 18 08:00 AM.
+Bot:   Schedule set: "0 8 * * *"
+       Next run: Tue Mar 18 08:00 AM UTC
 
-User:  /weather-schedules
+User:  /recurring-weather * * * * *
+Bot:   Invalid cron expression: schedule fires too frequently (every 1m0s);
+       minimum interval is 15m0s
+
+User:  /weather-schedule
 Bot:   Active schedule: "0 8 * * *"
        Created: 2026-03-17
        Last run: never
+       Next run: Tue Mar 18 08:00 AM UTC
 
 User:  /cancel-weather
 Bot:   Schedule cancelled. You will no longer receive automatic weather updates.
 
 User:  /cancel-weather
 Bot:   No active schedule found for this chat.
+
+User:  /weather-config
+Bot:   Current weather config:
+         Station:  KBWI
+         City:     Baltimore
+         State:    MD
+         Timezone: ET (UTC-4)
+
+User:  /weather-config station KJFK
+Bot:   Station set to "KJFK".
+
+User:  /weather-config city New York
+Bot:   City set to "New York".
+
+User:  /weather-config timezone ET -5
+Bot:   Timezone set to ET (UTC-5).
 ```
 
 ---
 
 ## Implementation Status
 
-Implemented on branch `implement-recurring-weather-plan-v2`. All phases
-completed. All 32 tests pass (`go test ./...`). The project builds cleanly.
+Implemented on branch `implement-recurring-weather-plan-v2`. All 57 tests pass
+(`go test ./...`). The project builds cleanly with zero `go vet` warnings.
+
+### Session 1 -- Core recurring weather feature
 
 | Phase | Status | Notes |
 |---|---|---|
 | Phase 1 - Dependencies | Done | `modernc.org/sqlite` v1.47.0, `robfig/cron/v3` v3.0.1 |
 | Phase 2 - Weather extraction | Done | `internal/weather/weather.go` with `FetchWeather`, `FormatWeather`, `SendWeather`, `SendWeatherToChat` |
-| Phase 3 - Database layer | Done | `internal/database/db.go` with `Open`, `UpsertSchedule`, `RemoveSchedule`, `GetSchedule`, `ListSchedules`, `UpdateLastRun`. 10 tests in `db_test.go`. |
-| Phase 4 - Scheduler | Done | `internal/scheduler/scheduler.go` with `New`, `Start`, `Stop`, `AddSchedule`, `RemoveSchedule`, `LoadFromDB`, `HasSchedule`, `Count`, `ValidateCron`, `NextRun`. 9 tests in `scheduler_test.go`. Mutex-protected, proper entryID tracking, DB rollback on failure. |
-| Phase 5 - Command handlers | Done | `internal/commands/commands.go` with `HandleCommand` dispatch, `handleRecurringWeather`, `handleCancelWeather`, `handleWeatherSchedules`. 6 tests in `commands_test.go`. |
+| Phase 3 - Database layer | Done | `internal/database/db.go` with `Open`, `UpsertSchedule`, `RemoveSchedule`, `GetSchedule`, `ListSchedules`, `UpdateLastRun`. 10 tests. |
+| Phase 4 - Scheduler | Done | `internal/scheduler/scheduler.go` with `New`, `Start`, `Stop`, `AddSchedule`, `RemoveSchedule`, `LoadFromDB`, `HasSchedule`, `Count`, `ValidateCron`, `NextRun`. 9 tests. Mutex-protected, proper entryID tracking, DB rollback on failure. |
+| Phase 5 - Command handlers | Done | `internal/commands/commands.go` with `HandleCommand` dispatch, `handleRecurringWeather`, `handleCancelWeather`, `handleWeatherSchedule`. 6 tests. |
 | Phase 6 - main.go integration | Done | Slim orchestration-only `main.go`. Fixed `/weather` length-check bug. |
-| Phase 7 - Testing | Done | 32 tests across 4 packages. Database tests use `:memory:` SQLite. |
+| Phase 7 - Testing | Done | 32 tests across 4 packages. |
 | Phase 8 - Documentation | Done | Updated `README.md` with new commands. Added `data/` to `.gitignore`. |
+
+### Session 2 -- Improvements and new features
+
+| Change | Status | Notes |
+|---|---|---|
+| Rename `/weather-schedules` to `/weather-schedule` | Done | Single schedule per chat, so singular name is correct. Updated commands, tests, README. |
+| Rate limiting (15 min minimum) | Done | `ValidateCron` now samples 5 consecutive firings and rejects if any gap < 15 minutes. 6 new rate-limit test cases. |
+| Per-user config (`/weather-config`) | Done | New `user_config` DB table. `GetUserConfig` returns defaults for unconfigured chats. Settings: `station`, `city`, `state`, `timezone`. 4 new DB tests, 10 new command tests. |
+| Weather package refactored for config | Done | `FetchWeather(cfg)` and `FormatWeather(data, cfg)` accept a `Config` struct. Constants removed; station/city/state/timezone are now per-user. 4 new weather tests. |
+| Scheduler uses per-chat config | Done | `sender` callback in `main.go` looks up `user_config` from DB before fetching weather. |
+| `MessageSender` interface | Done | `commands.Deps.Bot` is now a `MessageSender` interface instead of `*tgbotapi.BotAPI`. Tests use `mockSender` -- no more `recover()` hacks. All 22 command tests use proper mocking. |
+| Graceful shutdown | Done | `main.go` listens for SIGINT/SIGTERM via `os/signal`, calls `bot.StopReceivingUpdates()`, deferred `sched.Stop()` and `database.Close()` run cleanly. |
 
 ### All 11 prior-attempt bugs fixed
 
@@ -339,36 +374,34 @@ completed. All 32 tests pass (`go test ./...`). The project builds cleanly.
 10. Standard 5-field cron parser (Minute|Hour|Dom|Month|Dow).
 11. `/weather` uses simple `text == "/weather"`.
 
+### Test summary (57 tests)
+
+| Package | Tests | Coverage area |
+|---|---|---|
+| `internal/database` | 14 | Schema creation, schedule CRUD, upsert semantics, user config CRUD, defaults |
+| `internal/scheduler` | 13 | Cron validation, rate limiting, add/remove/replace schedules, DB loading, entry registration |
+| `internal/commands` | 22 | Command routing (14 cases), recurring weather parsing, cron validation errors, rate limit rejection, cancel integration, schedule display, config set/get (station, city, state, timezone), multi-setting persistence, unknown setting, input normalization |
+| `internal/weather` | 8 | Celsius conversion, format with default/custom config, zero values, LocationName, APIEndpoint, DefaultConfig |
+
 ### What still needs improvement
 
-- **End-to-end testing with a real Telegram bot:** The command handler tests
-  use `recover()` to work around the nil bot. Introducing a `MessageSender`
-  interface that wraps `bot.Send()` would allow proper mocking without panics.
-- **Graceful shutdown:** The bot currently relies on the `for range updates`
-  loop to block. Adding OS signal handling (`os.Signal` / `context.Context`)
-  would ensure the scheduler and database are shut down cleanly on SIGINT/SIGTERM.
-- **Rate limiting:** There is no guard against users setting cron expressions
-  that fire very frequently (e.g., `* * * * *` = every minute). A minimum
-  interval check (e.g., at least 15 minutes) would prevent abuse.
-- **Timezone awareness:** Cron expressions run in UTC. Users may expect local
-  time. Allowing a timezone argument or deriving it from the user's Telegram
-  locale would improve UX.
 - **Error resilience in scheduled sends:** If the NOAA API is down when a cron
   job fires, the error is logged but the user gets no notification. A retry
   mechanism or a "weather unavailable" message would be better.
 - **Weather logs table:** The plan originally included a `weather_logs` table
   for audit purposes. This was intentionally deferred as it adds complexity
   without immediate user value.
-- **Configurable weather station:** The station (KBWI/Baltimore) is hardcoded.
-  A per-chat station configuration would make the bot useful beyond Baltimore.
+- **NOAA station validation:** `/weather-config station` accepts any string.
+  Validating against the NOAA API (or a known station list) would prevent
+  users from setting non-existent stations.
+- **Timezone-aware cron display:** Next-run times are shown in UTC. Displaying
+  them in the user's configured timezone would improve UX.
 
 ---
 
 ## Future Enhancements (Out of Scope)
 
-- Per-user weather station / location configuration.
-- Timezone-aware cron expressions (display next-run in user's local time).
 - Multiple schedules per chat.
 - Admin command to list all schedules across all chats.
-- Rate limiting to prevent cron expressions that fire too frequently.
 - Webhook mode instead of long-polling for lower latency at scale.
+- `/weather-config reset` command to restore defaults.

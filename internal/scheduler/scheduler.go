@@ -57,12 +57,37 @@ func (s *Scheduler) Stop() {
 	log.Println("Scheduler stopped")
 }
 
-// ValidateCron checks whether a cron expression is valid.
+// MinInterval is the minimum allowed interval between cron firings.
+const MinInterval = 15 * time.Minute
+
+// ValidateCron checks whether a cron expression is valid and does not fire
+// more frequently than MinInterval.
 // Returns nil on success, an error describing the problem on failure.
 func ValidateCron(expr string) error {
-	_, err := cronParser.Parse(expr)
+	sched, err := cronParser.Parse(expr)
 	if err != nil {
 		return fmt.Errorf("invalid cron expression: %w", err)
+	}
+
+	if err := checkMinInterval(sched); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkMinInterval samples 5 consecutive firings from a reference time and
+// rejects the expression if any gap is shorter than MinInterval.
+func checkMinInterval(sched cron.Schedule) error {
+	// Use a fixed reference to make the check deterministic
+	ref := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	prev := sched.Next(ref)
+	for i := 0; i < 5; i++ {
+		next := sched.Next(prev)
+		if next.Sub(prev) < MinInterval {
+			return fmt.Errorf("schedule fires too frequently (every %s); minimum interval is %s",
+				next.Sub(prev).Truncate(time.Second), MinInterval)
+		}
+		prev = next
 	}
 	return nil
 }

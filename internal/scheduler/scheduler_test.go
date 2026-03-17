@@ -41,8 +41,13 @@ func TestValidateCron(t *testing.T) {
 	}{
 		{"valid weekday 9am", "0 9 * * 1-5", false},
 		{"valid daily 8am", "0 8 * * *", false},
-		{"valid every minute", "* * * * *", false},
+		{"valid every 15 min", "*/15 * * * *", false},
+		{"valid every 30 min", "0,30 * * * *", false},
 		{"valid complex", "30 6,18 * * 1-5", false},
+		{"too frequent every minute", "* * * * *", true},
+		{"too frequent every 5 min", "*/5 * * * *", true},
+		{"too frequent every 10 min", "*/10 * * * *", true},
+		{"too frequent every 14 min", "0,14,28,42,56 * * * *", true},
 		{"invalid empty", "", true},
 		{"invalid garbage", "not a cron", true},
 		{"invalid too few fields", "0 9 *", true},
@@ -57,6 +62,30 @@ func TestValidateCron(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateCronRateLimitMessage(t *testing.T) {
+	err := ValidateCron("* * * * *")
+	if err == nil {
+		t.Fatal("expected error for every-minute cron")
+	}
+	// Error message should mention the frequency and the minimum
+	errStr := err.Error()
+	if !containsStr(errStr, "too frequently") {
+		t.Errorf("error message should mention 'too frequently', got: %s", errStr)
+	}
+	if !containsStr(errStr, "15m") {
+		t.Errorf("error message should mention '15m' minimum, got: %s", errStr)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNextRun(t *testing.T) {
@@ -215,16 +244,12 @@ func TestLoadFromDB(t *testing.T) {
 	}
 }
 
-func TestCronActuallyFires(t *testing.T) {
-	s, sent := newTestScheduler(t)
+func TestCronEntryRegistered(t *testing.T) {
+	s, _ := newTestScheduler(t)
 	s.Start()
 
-	// Schedule to fire every second (using every-minute cron with a short test)
-	// We can't use "* * * * *" and wait 60s in a test, so use the cron library's
-	// @every directive which the parser also supports.
-	// Actually the standard 5-field parser doesn't support @every.
-	// Instead, schedule for "every minute" and verify the entry was registered.
-	err := s.AddSchedule(500, "* * * * *")
+	// Use every-15-minutes (the minimum allowed interval)
+	err := s.AddSchedule(500, "*/15 * * * *")
 	if err != nil {
 		t.Fatalf("AddSchedule failed: %v", err)
 	}
@@ -238,9 +263,24 @@ func TestCronActuallyFires(t *testing.T) {
 	if entry.Next.IsZero() {
 		t.Error("cron entry has zero next time")
 	}
+}
 
-	// We can't reasonably wait for a cron to fire in a unit test (minimum 1 minute),
-	// but we've verified the entry is registered with correct next time.
-	// The sender function works - verified by checking sent map is initialized.
-	_ = sent
+func TestAddScheduleRateLimited(t *testing.T) {
+	s, _ := newTestScheduler(t)
+	s.Start()
+
+	// Every minute should be rejected
+	err := s.AddSchedule(600, "* * * * *")
+	if err == nil {
+		t.Error("AddSchedule should reject every-minute cron")
+	}
+	if s.HasSchedule(600) {
+		t.Error("no schedule should exist after rate-limited rejection")
+	}
+
+	// Every 15 minutes should be accepted
+	err = s.AddSchedule(600, "*/15 * * * *")
+	if err != nil {
+		t.Fatalf("AddSchedule should accept every-15-min cron: %v", err)
+	}
 }
