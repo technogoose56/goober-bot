@@ -1,6 +1,8 @@
 package weather
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -155,6 +157,103 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.TimezoneOffset != -14400 {
 		t.Errorf("TimezoneOffset = %d, want -14400", cfg.TimezoneOffset)
 	}
+}
+
+// --- Station validation tests ---
+
+func TestStationEndpoint(t *testing.T) {
+	want := "https://api.weather.gov/stations/KJFK"
+	got := StationEndpoint("KJFK")
+	if got != want {
+		t.Errorf("StationEndpoint(KJFK) = %q, want %q", got, want)
+	}
+}
+
+func TestValidateStationValid(t *testing.T) {
+	// Mock NOAA API returning 200 for a valid station
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"properties":{"stationIdentifier":"KJFK"}}`))
+	}))
+	defer server.Close()
+
+	// Override the station endpoint by using a client that redirects to our server
+	client := server.Client()
+	// We need to intercept the request URL. Use a custom transport.
+	client.Transport = &rewriteTransport{base: client.Transport, targetURL: server.URL}
+
+	err := ValidateStation("KJFK", client)
+	if err != nil {
+		t.Errorf("ValidateStation should succeed for valid station, got: %v", err)
+	}
+}
+
+func TestValidateStationNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = &rewriteTransport{base: client.Transport, targetURL: server.URL}
+
+	err := ValidateStation("XYZZY", client)
+	if err == nil {
+		t.Error("ValidateStation should fail for non-existent station")
+	}
+	if !containsSubstring(err.Error(), "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+}
+
+func TestValidateStationServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	client.Transport = &rewriteTransport{base: client.Transport, targetURL: server.URL}
+
+	err := ValidateStation("KBWI", client)
+	if err == nil {
+		t.Error("ValidateStation should fail for server error")
+	}
+	if !containsSubstring(err.Error(), "500") {
+		t.Errorf("error should mention status code, got: %v", err)
+	}
+}
+
+func TestValidateStationNilClient(t *testing.T) {
+	// Calling with nil client should not panic (uses default client).
+	// We can't easily test the HTTP call without a server, but we can verify it doesn't panic.
+	// This will attempt a real HTTP call, so we just check that it returns without panic.
+	// Skip in short mode to avoid network calls.
+	if testing.Short() {
+		t.Skip("skipping network test in short mode")
+	}
+	// KBWI is a known-valid station
+	err := ValidateStation("KBWI", nil)
+	if err != nil {
+		t.Logf("ValidateStation with nil client: %v (may fail without network)", err)
+	}
+}
+
+// rewriteTransport rewrites outgoing request URLs to point at a local test server.
+type rewriteTransport struct {
+	base      http.RoundTripper
+	targetURL string
+}
+
+func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "http"
+	req.URL.Host = t.targetURL[len("http://"):]
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
 
 func containsSubstring(s, sub string) bool {

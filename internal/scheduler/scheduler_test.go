@@ -284,3 +284,87 @@ func TestAddScheduleRateLimited(t *testing.T) {
 		t.Fatalf("AddSchedule should accept every-15-min cron: %v", err)
 	}
 }
+
+// --- Timezone-aware display tests ---
+
+func TestFormatNextRunDefaultTimezone(t *testing.T) {
+	// Default timezone is ET (UTC-4)
+	result, err := FormatNextRun("0 9 * * *", "ET", -14400)
+	if err != nil {
+		t.Fatalf("FormatNextRun failed: %v", err)
+	}
+
+	// Should contain timezone label, not "UTC"
+	if !containsStr(result, "ET") {
+		t.Errorf("FormatNextRun should contain timezone label 'ET', got: %s", result)
+	}
+	if containsStr(result, "UTC") {
+		t.Errorf("FormatNextRun should not contain 'UTC' when timezone is ET, got: %s", result)
+	}
+	// Should contain AM/PM format
+	if !containsStr(result, "AM") && !containsStr(result, "PM") {
+		t.Errorf("FormatNextRun should contain AM/PM, got: %s", result)
+	}
+}
+
+func TestFormatNextRunPacificTimezone(t *testing.T) {
+	result, err := FormatNextRun("0 18 * * *", "PT", -28800) // 6 PM UTC = 10 AM PT
+	if err != nil {
+		t.Fatalf("FormatNextRun failed: %v", err)
+	}
+	if !containsStr(result, "PT") {
+		t.Errorf("FormatNextRun should contain 'PT', got: %s", result)
+	}
+	// 18:00 UTC is 10:00 AM PT
+	if !containsStr(result, "10:00 AM") {
+		t.Errorf("FormatNextRun should show 10:00 AM PT for 18:00 UTC, got: %s", result)
+	}
+}
+
+func TestFormatNextRunInvalidCron(t *testing.T) {
+	result, err := FormatNextRun("invalid", "ET", -14400)
+	if err == nil {
+		t.Error("FormatNextRun should fail for invalid cron")
+	}
+	if result != "unknown" {
+		t.Errorf("FormatNextRun should return 'unknown' on error, got: %s", result)
+	}
+}
+
+func TestFormatTimeInTZRFC3339(t *testing.T) {
+	// 2026-03-17T18:30:00Z in ET (UTC-4) is 2:30 PM
+	result := FormatTimeInTZ("2026-03-17T18:30:00Z", "ET", -14400)
+	if !containsStr(result, "2:30 PM") {
+		t.Errorf("FormatTimeInTZ should show 2:30 PM ET, got: %s", result)
+	}
+	if !containsStr(result, "ET") {
+		t.Errorf("FormatTimeInTZ should contain 'ET', got: %s", result)
+	}
+}
+
+func TestFormatTimeInTZPacific(t *testing.T) {
+	// 2026-03-17T18:30:00Z in PT (UTC-8) is 10:30 AM
+	result := FormatTimeInTZ("2026-03-17T18:30:00Z", "PT", -28800)
+	if !containsStr(result, "10:30 AM") {
+		t.Errorf("FormatTimeInTZ should show 10:30 AM PT, got: %s", result)
+	}
+	if !containsStr(result, "PT") {
+		t.Errorf("FormatTimeInTZ should contain 'PT', got: %s", result)
+	}
+}
+
+func TestFormatTimeInTZUnparseable(t *testing.T) {
+	// If the string can't be parsed, return it as-is
+	result := FormatTimeInTZ("not-a-time", "ET", -14400)
+	if result != "not-a-time" {
+		t.Errorf("FormatTimeInTZ should return original string on parse failure, got: %s", result)
+	}
+}
+
+func TestFormatTimeInTZNever(t *testing.T) {
+	// "never" should pass through unchanged
+	result := FormatTimeInTZ("never", "ET", -14400)
+	if result != "never" {
+		t.Errorf("FormatTimeInTZ should return 'never' unchanged, got: %s", result)
+	}
+}

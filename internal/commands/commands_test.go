@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -41,7 +43,15 @@ func (m *mockSender) messageCount() int {
 }
 
 // newTestDeps creates a Deps with mock bot, in-memory DB, and real scheduler.
+// Uses a mock HTTP server that returns 200 for station validation (valid station).
 func newTestDeps(t *testing.T) (Deps, *mockSender) {
+	t.Helper()
+	return newTestDepsWithHTTPStatus(t, http.StatusOK)
+}
+
+// newTestDepsWithHTTPStatus creates test deps with a mock HTTP server
+// that returns the given status code for all requests.
+func newTestDepsWithHTTPStatus(t *testing.T, statusCode int) (Deps, *mockSender) {
 	t.Helper()
 	db, err := database.Open(":memory:")
 	if err != nil {
@@ -54,9 +64,34 @@ func newTestDeps(t *testing.T) (Deps, *mockSender) {
 	sched.Start()
 	t.Cleanup(func() { sched.Stop() })
 
+	// Mock HTTP server for NOAA station validation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(statusCode)
+	}))
+	t.Cleanup(server.Close)
+	httpClient := server.Client()
+	httpClient.Transport = &rewriteTransport{base: httpClient.Transport, targetURL: server.URL}
+
 	mock := &mockSender{}
-	deps := Deps{Bot: mock, Scheduler: sched, DB: db}
+	deps := Deps{Bot: mock, Scheduler: sched, DB: db, HTTPClient: httpClient}
 	return deps, mock
+}
+
+// rewriteTransport rewrites outgoing request URLs to point at a local test server.
+type rewriteTransport struct {
+	base      http.RoundTripper
+	targetURL string
+}
+
+func (rt *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "http"
+	req.URL.Host = rt.targetURL[len("http://"):]
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
 
 func TestHandleCommandRouting(t *testing.T) {
@@ -70,6 +105,7 @@ func TestHandleCommandRouting(t *testing.T) {
 		{"recurring-weather with space", "/recurring-weather ", true},
 		{"cancel-weather", "/cancel-weather", true},
 		{"weather-schedule", "/weather-schedule", true},
+		{"weather-schedules plural alias", "/weather-schedules", true},
 		{"weather-config no args", "/weather-config", true},
 		{"weather-config with args", "/weather-config station KJFK", true},
 		{"weather-config prefix attack", "/weather-configX", false},
@@ -360,6 +396,113 @@ func TestWeatherConfigStationNoValue(t *testing.T) {
 
 	if !containsStr(mock.lastMessage(), "Usage:") {
 		t.Errorf("expected usage message, got: %s", mock.lastMessage())
+	}
+}
+
+func TestWeatherConfigStationValidationFails(t *testing.T) {
+	// Use a mock server that returns 404 (station not found)
+	deps, mock := newTestDepsWithHTTPStatus(t, http.StatusNotFound)
+
+	handleWeatherConfig("/weather-config station XYZZY", 1400, deps)
+
+	// Should NOT have saved the station
+	cfg, err := database.GetUserConfig(deps.DB, 1400)
+	if err != nil {
+		t.Fatalf("GetUserConfig failed: %v", err)
+	}
+	if cfg.StationCode != "KBWI" {
+		t.Errorf("StationCode should remain default KBWI, got %q", cfg.StationCode)
+	}
+
+	// Should have sent an error message
+	if !containsStr(mock.lastMessage(), "Invalid station code") {
+		t.Errorf("expected 'Invalid station code' message, got: %s", mock.lastMessage())
+	}
+}
+
+func TestWeatherConfigStationValidationSucceeds(t *testing.T) {
+	// Use a mock server that returns 200 (valid station)
+	deps, mock := newTestDepsWithHTTPStatus(t, http.StatusOK)
+
+	handleWeatherConfig("/weather-config station KJFK", 1500, deps)
+
+	cfg, err := database.GetUserConfig(deps.DB, 1500)
+	if err != nil {
+		t.Fatalf("GetUserConfig failed: %v", err)
+	}
+	if cfg.StationCode != "KJFK" {
+		t.Errorf("StationCode = %q, want KJFK", cfg.StationCode)
+	}
+
+	if !containsStr(mock.lastMessage(), "KJFK") {
+		t.Errorf("reply should mention KJFK, got: %s", mock.lastMessage())
+	}
+}
+
+// --- Timezone-aware display tests ---
+
+func TestRecurringWeatherShowsTimezone(t *testing.T) {
+	deps, mock := newTestDeps(t)
+
+	// Set user's timezone to PT (UTC-8)
+	cfg := database.UserConfig{
+		ChatID:         1600,
+		StationCode:    "KBWI",
+		City:           "Baltimore",
+		State:          "MD",
+		TimezoneName:   "PT",
+		TimezoneOffset: -28800,
+	}
+	if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	handleRecurringWeather("/recurring-weather 0 9 * * 1-5", 1600, deps)
+
+	last := mock.lastMessage()
+	if !containsStr(last, "PT") {
+		t.Errorf("recurring weather confirmation should show user timezone 'PT', got: %s", last)
+	}
+	// Should NOT say "UTC"
+	if containsStr(last, "UTC") {
+		t.Errorf("recurring weather confirmation should not show 'UTC' when user has PT timezone, got: %s", last)
+	}
+}
+
+func TestRecurringWeatherDefaultTimezone(t *testing.T) {
+	deps, mock := newTestDeps(t)
+
+	// No timezone configured -> should use default ET
+	handleRecurringWeather("/recurring-weather 0 9 * * *", 1700, deps)
+
+	last := mock.lastMessage()
+	if !containsStr(last, "ET") {
+		t.Errorf("recurring weather confirmation should show default timezone 'ET', got: %s", last)
+	}
+}
+
+func TestWeatherScheduleShowsTimezone(t *testing.T) {
+	deps, mock := newTestDeps(t)
+
+	// Set user's timezone
+	cfg := database.UserConfig{
+		ChatID:         1800,
+		StationCode:    "KBWI",
+		City:           "Baltimore",
+		State:          "MD",
+		TimezoneName:   "CT",
+		TimezoneOffset: -21600,
+	}
+	if err := database.UpsertUserConfig(deps.DB, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	handleRecurringWeather("/recurring-weather 0 14 * * *", 1800, deps)
+	handleWeatherSchedule(1800, deps)
+
+	last := mock.lastMessage()
+	if !containsStr(last, "CT") {
+		t.Errorf("weather schedule should show user timezone 'CT', got: %s", last)
 	}
 }
 

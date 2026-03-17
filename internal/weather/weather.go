@@ -146,3 +146,39 @@ func SendWeatherToChat(chatID int64, bot *tgbotapi.BotAPI, cfg Config) error {
 
 	return nil
 }
+
+// StationEndpoint returns the NOAA station metadata URL for the given code.
+func StationEndpoint(stationCode string) string {
+	return "https://api.weather.gov/stations/" + stationCode
+}
+
+// ValidateStation checks whether a NOAA station code exists by querying the
+// NOAA API. It accepts an optional *http.Client (pass nil to use a default).
+// Returns nil if the station is valid, or a descriptive error otherwise.
+func ValidateStation(stationCode string, client *http.Client) error {
+	if client == nil {
+		client = &http.Client{Timeout: Timeout}
+	}
+
+	req, err := http.NewRequest("GET", StationEndpoint(stationCode), nil)
+	if err != nil {
+		return fmt.Errorf("failed to create validation request: %w", err)
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("Accept", "application/geo+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to reach NOAA API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("station %q not found; check the code at https://www.weather.gov", stationCode)
+	default:
+		return fmt.Errorf("NOAA API returned status %d while validating station %q", resp.StatusCode, stationCode)
+	}
+}

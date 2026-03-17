@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	"goober-bot/internal/database"
 	"goober-bot/internal/scheduler"
+	"goober-bot/internal/weather"
 )
 
 // MessageSender is an interface for sending Telegram messages.
@@ -21,9 +23,10 @@ type MessageSender interface {
 
 // Deps bundles the dependencies that command handlers need.
 type Deps struct {
-	Bot       MessageSender
-	Scheduler *scheduler.Scheduler
-	DB        *sql.DB
+	Bot        MessageSender
+	Scheduler  *scheduler.Scheduler
+	DB         *sql.DB
+	HTTPClient *http.Client // optional; used for NOAA station validation (nil = default)
 }
 
 // HandleCommand checks if the message is a known command and handles it.
@@ -36,7 +39,7 @@ func HandleCommand(text string, chatID int64, deps Deps) bool {
 	case text == "/cancel-weather":
 		handleCancelWeather(chatID, deps)
 		return true
-	case text == "/weather-schedule":
+	case text == "/weather-schedule" || text == "/weather-schedules":
 		handleWeatherSchedule(chatID, deps)
 		return true
 	case text == "/weather-config" || strings.HasPrefix(text, "/weather-config "):
@@ -55,10 +58,11 @@ func handleRecurringWeather(text string, chatID int64, deps Deps) {
 	if cronExpr == "" {
 		reply(chatID, deps.Bot,
 			"Usage: /recurring-weather <cron expression>\n\n"+
-				"Examples:\n"+
+				"Cron times are in UTC. Examples:\n"+
 				"  /recurring-weather 0 9 * * 1-5   (weekdays at 9:00 AM UTC)\n"+
 				"  /recurring-weather 0 8 * * *     (daily at 8:00 AM UTC)\n"+
-				"  /recurring-weather 30 6,18 * * *  (daily at 6:30 AM and 6:30 PM UTC)")
+				"  /recurring-weather 30 6,18 * * *  (daily at 6:30 AM and 6:30 PM UTC)\n\n"+
+				"Times will be displayed in your configured timezone.")
 		return
 	}
 
@@ -75,11 +79,9 @@ func handleRecurringWeather(text string, chatID int64, deps Deps) {
 		return
 	}
 
-	next, err := scheduler.NextRun(cronExpr)
-	nextStr := "unknown"
-	if err == nil {
-		nextStr = next.Format("Mon Jan 2 3:04 PM UTC")
-	}
+	// Format next run in user's timezone
+	cfg, _ := database.GetUserConfig(deps.DB, chatID)
+	nextStr, _ := scheduler.FormatNextRun(cronExpr, cfg.TimezoneName, cfg.TimezoneOffset)
 
 	reply(chatID, deps.Bot, fmt.Sprintf(
 		"Schedule set: %q\nNext run: %s",
@@ -103,16 +105,15 @@ func handleWeatherSchedule(chatID int64, deps Deps) {
 		return
 	}
 
+	// Look up user's timezone for display
+	cfg, _ := database.GetUserConfig(deps.DB, chatID)
+
 	lastRun := "never"
 	if sched.LastRun != nil {
-		lastRun = *sched.LastRun
+		lastRun = scheduler.FormatTimeInTZ(*sched.LastRun, cfg.TimezoneName, cfg.TimezoneOffset)
 	}
 
-	next, err := scheduler.NextRun(sched.CronExpression)
-	nextStr := "unknown"
-	if err == nil {
-		nextStr = next.Format("Mon Jan 2 3:04 PM UTC")
-	}
+	nextStr, _ := scheduler.FormatNextRun(sched.CronExpression, cfg.TimezoneName, cfg.TimezoneOffset)
 
 	reply(chatID, deps.Bot, fmt.Sprintf(
 		"Active schedule: %q\nCreated: %s\nLast run: %s\nNext run: %s",
@@ -156,6 +157,11 @@ func handleWeatherConfig(text string, chatID int64, deps Deps) {
 			return
 		}
 		code := strings.ToUpper(fields[1])
+		// Validate station against the NOAA API
+		if err := weather.ValidateStation(code, deps.HTTPClient); err != nil {
+			reply(chatID, deps.Bot, fmt.Sprintf("Invalid station code: %v", err))
+			return
+		}
 		cfg, err := database.GetUserConfig(deps.DB, chatID)
 		if err != nil {
 			log.Printf("Failed to get user config for chat %d: %v", chatID, err)

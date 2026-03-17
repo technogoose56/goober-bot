@@ -332,7 +332,7 @@ Bot:   Timezone set to ET (UTC-5).
 
 ## Implementation Status
 
-Implemented on branch `implement-recurring-weather-plan-v2`. All 57 tests pass
+Implemented on branch `implement-recurring-weather-plan-v2`. All 71 tests pass
 (`go test ./...`). The project builds cleanly with zero `go vet` warnings.
 
 ### Session 1 -- Core recurring weather feature
@@ -374,14 +374,26 @@ Implemented on branch `implement-recurring-weather-plan-v2`. All 57 tests pass
 10. Standard 5-field cron parser (Minute|Hour|Dom|Month|Dow).
 11. `/weather` uses simple `text == "/weather"`.
 
-### Test summary (57 tests)
+### Session 3 -- Station validation and timezone-aware display
+
+| Change | Status | Notes |
+|---|---|---|
+| NOAA station validation | Done | `weather.ValidateStation(code, client)` queries `api.weather.gov/stations/{CODE}` to verify the station exists before saving. Returns descriptive errors for 404 (not found) and other status codes. `Deps.HTTPClient` field added for testability. |
+| Station validation in `/weather-config station` | Done | Command handler now calls `ValidateStation` before persisting. Invalid stations are rejected with a user-friendly error. |
+| Station validation tests | Done | 5 new weather tests (`TestStationEndpoint`, `TestValidateStationValid`, `TestValidateStationNotFound`, `TestValidateStationServerError`, `TestValidateStationNilClient`) using `httptest.Server` with `rewriteTransport`. 2 new command tests (`TestWeatherConfigStationValidationFails`, `TestWeatherConfigStationValidationSucceeds`). |
+| Timezone-aware cron display | Done | `scheduler.FormatNextRun(expr, tzName, tzOffsetSecs)` and `scheduler.FormatTimeInTZ(timeStr, tzName, tzOffsetSecs)` format times in the user's configured timezone. |
+| Timezone-aware `/recurring-weather` confirmation | Done | Next-run time now displays in user's timezone (e.g., "Wed Mar 18 5:00 AM ET") instead of UTC. |
+| Timezone-aware `/weather-schedule` display | Done | Both next-run and last-run times display in user's timezone. Falls back gracefully if time cannot be parsed. |
+| Timezone display tests | Done | 7 new scheduler tests (`TestFormatNextRunDefaultTimezone`, `TestFormatNextRunPacificTimezone`, `TestFormatNextRunInvalidCron`, `TestFormatTimeInTZRFC3339`, `TestFormatTimeInTZPacific`, `TestFormatTimeInTZUnparseable`, `TestFormatTimeInTZNever`). 3 new command tests (`TestRecurringWeatherShowsTimezone`, `TestRecurringWeatherDefaultTimezone`, `TestWeatherScheduleShowsTimezone`). |
+
+### Test summary (71 tests)
 
 | Package | Tests | Coverage area |
 |---|---|---|
 | `internal/database` | 14 | Schema creation, schedule CRUD, upsert semantics, user config CRUD, defaults |
-| `internal/scheduler` | 13 | Cron validation, rate limiting, add/remove/replace schedules, DB loading, entry registration |
-| `internal/commands` | 22 | Command routing (14 cases), recurring weather parsing, cron validation errors, rate limit rejection, cancel integration, schedule display, config set/get (station, city, state, timezone), multi-setting persistence, unknown setting, input normalization |
-| `internal/weather` | 8 | Celsius conversion, format with default/custom config, zero values, LocationName, APIEndpoint, DefaultConfig |
+| `internal/scheduler` | 20 | Cron validation, rate limiting, add/remove/replace schedules, DB loading, entry registration, timezone-aware formatting (`FormatNextRun`, `FormatTimeInTZ`), edge cases (invalid cron, unparseable time) |
+| `internal/commands` | 25 | Command routing (14 cases), recurring weather parsing, cron validation errors, rate limit rejection, cancel integration, schedule display, config set/get (station, city, state, timezone), multi-setting persistence, unknown setting, input normalization, station validation (valid/invalid), timezone display in recurring-weather and weather-schedule |
+| `internal/weather` | 12 | Celsius conversion, format with default/custom config, zero values, LocationName, APIEndpoint, DefaultConfig, StationEndpoint, ValidateStation (valid/not-found/server-error/nil-client) |
 
 ### What still needs improvement
 
@@ -391,17 +403,11 @@ Implemented on branch `implement-recurring-weather-plan-v2`. All 57 tests pass
 - **Weather logs table:** The plan originally included a `weather_logs` table
   for audit purposes. This was intentionally deferred as it adds complexity
   without immediate user value.
-- **NOAA station validation:** `/weather-config station` accepts any string.
-  Validating against the NOAA API (or a known station list) would prevent
-  users from setting non-existent stations.
-- **Timezone-aware cron display:** Next-run times are shown in UTC. Displaying
-  them in the user's configured timezone would improve UX.
 
 ---
 
 ## Future Enhancements (Out of Scope)
 
-- Multiple schedules per chat.
 - Admin command to list all schedules across all chats.
 - Webhook mode instead of long-polling for lower latency at scale.
 - `/weather-config reset` command to restore defaults.

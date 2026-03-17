@@ -92,13 +92,39 @@ func checkMinInterval(sched cron.Schedule) error {
 	return nil
 }
 
-// NextRun returns the next scheduled time for the given cron expression.
+// NextRun returns the next scheduled time (in UTC) for the given cron expression.
 func NextRun(expr string) (time.Time, error) {
 	sched, err := cronParser.Parse(expr)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("invalid cron expression: %w", err)
 	}
 	return sched.Next(time.Now().UTC()), nil
+}
+
+// FormatNextRun returns the next scheduled time formatted in the given timezone.
+// tzName is the display label (e.g., "ET") and tzOffsetSecs is seconds east of UTC.
+func FormatNextRun(expr string, tzName string, tzOffsetSecs int) (string, error) {
+	next, err := NextRun(expr)
+	if err != nil {
+		return "unknown", err
+	}
+	tz := time.FixedZone(tzName, tzOffsetSecs)
+	return next.In(tz).Format("Mon Jan 2 3:04 PM") + " " + tzName, nil
+}
+
+// FormatTimeInTZ formats a time string (RFC3339 or similar) in the given timezone.
+// Returns the formatted string or falls back to the original on error.
+func FormatTimeInTZ(timeStr string, tzName string, tzOffsetSecs int) string {
+	t, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		// Try a looser parse
+		t, err = time.Parse("2006-01-02T15:04:05Z", timeStr)
+		if err != nil {
+			return timeStr // give back the original if we can't parse
+		}
+	}
+	tz := time.FixedZone(tzName, tzOffsetSecs)
+	return t.In(tz).Format("Mon Jan 2 3:04 PM") + " " + tzName
 }
 
 // AddSchedule registers a cron job for the given chat and persists it to the database.
