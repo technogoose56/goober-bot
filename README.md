@@ -54,6 +54,25 @@ Cron expressions use the standard 5-field format: `minute hour day-of-month mont
 
 Default location is Baltimore, MD (station KBWI). Weather data is fetched from the NOAA Weather API.
 
+## Docker
+
+Build the image:
+
+```bash
+docker build -t goober-bot .
+```
+
+Run the container:
+
+```bash
+docker run -d --name goober-bot \
+  -e TELEGRAM_BOT_TOKEN="your_bot_token_here" \
+  -v ./data:/data goober-bot \
+  goober-bot
+```
+
+The `-v ./data:/data goober-bot` flag persists the SQLite database across container restarts. Stop the container with `docker stop goober-bot`.
+
 ## Project Structure
 
 ```
