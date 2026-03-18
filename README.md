@@ -13,7 +13,17 @@ A Telegram bot built with Go that provides weather updates and scheduled weather
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token_here"
    ```
-3. Run the bot:
+3. (Optional) Restrict access to specific Telegram users by setting a comma-separated list of user IDs:
+   ```
+   $env:ALLOWED_USER_IDS="123456789,987654321"
+   ```
+   or
+   ```bash
+   export ALLOWED_USER_IDS="123456789,987654321"
+   ```
+   If this variable is not set or is empty, all users can interact with the bot.
+
+4. Run the bot:
    ```bash
    go run main.go
    ```
@@ -67,6 +77,7 @@ Run the container:
 ```bash
 docker run -d --name goober-bot \
   -e TELEGRAM_BOT_TOKEN="your_bot_token_here" \
+  -e ALLOWED_USER_IDS="123456789,987654321" \
   -v ./data:/data goober-bot \
   goober-bot
 ```
@@ -78,6 +89,7 @@ The `-v ./data:/data goober-bot` flag persists the SQLite database across contai
 ```
 main.go                           Entry point and update loop
 internal/
+  access/access.go                User whitelist and access control
   weather/weather.go              Weather API client and formatting
   database/db.go                  SQLite persistence layer
   scheduler/scheduler.go          Cron job management

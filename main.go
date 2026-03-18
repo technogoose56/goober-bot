@@ -9,6 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"goober-bot/internal/access"
 	"goober-bot/internal/commands"
 	"goober-bot/internal/database"
 	"goober-bot/internal/scheduler"
@@ -60,6 +61,14 @@ func main() {
 		DB:        db,
 	}
 
+	// Initialize user whitelist
+	wl := access.Parse(os.Getenv("ALLOWED_USER_IDS"))
+	if wl.Count() > 0 {
+		log.Printf("Whitelist active: %d user(s) allowed", wl.Count())
+	} else {
+		log.Println("Whitelist not configured: all users allowed")
+	}
+
 	log.Println("Bot started and listening for updates")
 
 	// Set up graceful shutdown on SIGINT / SIGTERM
@@ -85,6 +94,12 @@ func main() {
 			}
 
 			if update.Message == nil {
+				continue
+			}
+
+			// Check user whitelist before processing any commands
+			from := update.Message.From
+			if from == nil || !wl.IsAllowed(from.ID) {
 				continue
 			}
 
