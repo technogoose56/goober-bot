@@ -395,6 +395,20 @@ Implemented on branch `implement-recurring-weather-plan-v2`. All 71 tests pass
 | `internal/commands` | 25 | Command routing (14 cases), recurring weather parsing, cron validation errors, rate limit rejection, cancel integration, schedule display, config set/get (station, city, state, timezone), multi-setting persistence, unknown setting, input normalization, station validation (valid/invalid), timezone display in recurring-weather and weather-schedule |
 | `internal/weather` | 12 | Celsius conversion, format with default/custom config, zero values, LocationName, APIEndpoint, DefaultConfig, StationEndpoint, ValidateStation (valid/not-found/server-error/nil-client) |
 
+### Session 4 -- Timezone-aware scheduling
+
+| Change | Status | Notes |
+|---|---|---|
+| `cron_expression_utc` DB column | Done | Added via migration in `Open()`. Existing rows are backfilled with their existing expression (treated as UTC). New rows always store both the user expression and the UTC expression. |
+| `UpsertSchedule` takes both expressions | Done | `UpsertSchedule(db, chatID, userExpr, utcExpr string)` — stores user's original expression for display and the UTC-converted expression for scheduling. |
+| `HasUserConfig(db, chatID) (bool, error)` | Done | Returns true if the chat has an explicit row in `user_config`. Used to distinguish "no timezone configured" from "using default timezone". |
+| `ConvertCronToUTC(expr, offsetSecs)` | Done | Converts simple cron expressions (single values, comma-separated lists, ranges in the hour field) from a local timezone to UTC. Handles midnight-boundary day-of-week shifts. Passes through step-based and wildcard-hour expressions unchanged. |
+| `AddSchedule` uses UTC expression | Done | Schedules the UTC expression with the cron runner; stores both via `UpsertSchedule`. |
+| `LoadFromDB` uses `CronExpressionUTC` | Done | Bot restarts correctly reload the pre-converted UTC expression without re-converting. |
+| No timezone configured → UTC + notice | Done | If no `user_config` row exists, the cron expression is treated as UTC and the user receives a notice to set their timezone via `/weather-config timezone`. |
+| Next-run display uses UTC expression | Done | `FormatNextRun` is called with the UTC expression and the user's timezone to correctly show the local equivalent time. |
+| Plan updated | Done | This section. |
+
 ### What still needs improvement
 
 - **Error resilience in scheduled sends:** If the NOAA API is down when a cron

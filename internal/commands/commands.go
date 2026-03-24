@@ -58,10 +58,11 @@ func handleRecurringWeather(text string, chatID int64, deps Deps) {
 	if cronExpr == "" {
 		reply(chatID, deps.Bot,
 			"Usage: /recurring-weather <cron expression>\n\n"+
-				"Cron times are in UTC. Examples:\n"+
-				"  /recurring-weather 0 9 * * 1-5   (weekdays at 9:00 AM UTC)\n"+
-				"  /recurring-weather 0 8 * * *     (daily at 8:00 AM UTC)\n"+
-				"  /recurring-weather 30 6,18 * * *  (daily at 6:30 AM and 6:30 PM UTC)\n\n"+
+				"Cron times are in your configured timezone. Examples:\n"+
+				"  /recurring-weather 0 9 * * 1-5   (weekdays at 9:00 AM)\n"+
+				"  /recurring-weather 0 8 * * *     (daily at 8:00 AM)\n"+
+				"  /recurring-weather 30 6,18 * * *  (daily at 6:30 AM and 6:30 PM)\n\n"+
+				"Use /weather-config timezone to set your timezone.\n"+
 				"Times will be displayed in your configured timezone.")
 		return
 	}
@@ -72,20 +73,48 @@ func handleRecurringWeather(text string, chatID int64, deps Deps) {
 		return
 	}
 
+	// Determine the UTC expression to schedule based on user's timezone
+	hasTimezone, _ := database.HasUserConfig(deps.DB, chatID)
+	cfg, _ := database.GetUserConfig(deps.DB, chatID)
+
+	var utcExpr string
+	var tzNotice string
+	var tzName string
+	var tzOffset int
+
+	if !hasTimezone {
+		// No timezone configured — treat cron as UTC and notify the user
+		utcExpr = cronExpr
+		tzName = "UTC"
+		tzOffset = 0
+		tzNotice = "\n\nNote: No timezone set. Schedule times are in UTC.\nUse /weather-config timezone <name> <offset> to set your timezone."
+	} else {
+		converted, err := scheduler.ConvertCronToUTC(cronExpr, cfg.TimezoneOffset)
+		if err != nil {
+			// Expression too complex to convert — fall back to UTC
+			utcExpr = cronExpr
+			tzName = "UTC"
+			tzOffset = 0
+			tzNotice = "\n\nNote: Could not convert schedule to your timezone automatically. Times are in UTC."
+		} else {
+			utcExpr = converted
+			tzName = cfg.TimezoneName
+			tzOffset = cfg.TimezoneOffset
+		}
+	}
+
 	// Add schedule (persists to DB and registers cron job)
-	if err := deps.Scheduler.AddSchedule(chatID, cronExpr); err != nil {
+	if err := deps.Scheduler.AddSchedule(chatID, cronExpr, utcExpr); err != nil {
 		log.Printf("Failed to add schedule for chat %d: %v", chatID, err)
 		reply(chatID, deps.Bot, fmt.Sprintf("Failed to set schedule: %v", err))
 		return
 	}
 
-	// Format next run in user's timezone
-	cfg, _ := database.GetUserConfig(deps.DB, chatID)
-	nextStr, _ := scheduler.FormatNextRun(cronExpr, cfg.TimezoneName, cfg.TimezoneOffset)
+	nextStr, _ := scheduler.FormatNextRun(utcExpr, tzName, tzOffset)
 
 	reply(chatID, deps.Bot, fmt.Sprintf(
-		"Schedule set: %q\nNext run: %s",
-		cronExpr, nextStr))
+		"Schedule set: %q\nNext run: %s%s",
+		cronExpr, nextStr, tzNotice))
 }
 
 func handleCancelWeather(chatID int64, deps Deps) {
@@ -105,15 +134,26 @@ func handleWeatherSchedule(chatID int64, deps Deps) {
 		return
 	}
 
-	// Look up user's timezone for display
+	// Determine display timezone
+	hasTimezone, _ := database.HasUserConfig(deps.DB, chatID)
 	cfg, _ := database.GetUserConfig(deps.DB, chatID)
+
+	var tzName string
+	var tzOffset int
+	if !hasTimezone {
+		tzName = "UTC"
+		tzOffset = 0
+	} else {
+		tzName = cfg.TimezoneName
+		tzOffset = cfg.TimezoneOffset
+	}
 
 	lastRun := "never"
 	if sched.LastRun != nil {
-		lastRun = scheduler.FormatTimeInTZ(*sched.LastRun, cfg.TimezoneName, cfg.TimezoneOffset)
+		lastRun = scheduler.FormatTimeInTZ(*sched.LastRun, tzName, tzOffset)
 	}
 
-	nextStr, _ := scheduler.FormatNextRun(sched.CronExpression, cfg.TimezoneName, cfg.TimezoneOffset)
+	nextStr, _ := scheduler.FormatNextRun(sched.CronExpressionUTC, tzName, tzOffset)
 
 	reply(chatID, deps.Bot, fmt.Sprintf(
 		"Active schedule: %q\nCreated: %s\nLast run: %s\nNext run: %s",

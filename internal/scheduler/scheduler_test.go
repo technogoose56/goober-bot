@@ -112,7 +112,7 @@ func TestAddSchedule(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	s.Start()
 
-	err := s.AddSchedule(100, "0 9 * * 1-5")
+	err := s.AddSchedule(100, "0 9 * * 1-5", "0 9 * * 1-5")
 	if err != nil {
 		t.Fatalf("AddSchedule failed: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAddScheduleInvalidCron(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	s.Start()
 
-	err := s.AddSchedule(100, "not valid")
+	err := s.AddSchedule(100, "not valid", "not valid")
 	if err == nil {
 		t.Error("AddSchedule should fail for invalid cron")
 	}
@@ -151,10 +151,10 @@ func TestAddScheduleReplacesExisting(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	s.Start()
 
-	if err := s.AddSchedule(200, "0 9 * * *"); err != nil {
+	if err := s.AddSchedule(200, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddSchedule(200, "0 10 * * *"); err != nil {
+	if err := s.AddSchedule(200, "0 10 * * *", "0 10 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,7 +176,7 @@ func TestRemoveSchedule(t *testing.T) {
 	s, _ := newTestScheduler(t)
 	s.Start()
 
-	if err := s.AddSchedule(300, "0 9 * * *"); err != nil {
+	if err := s.AddSchedule(300, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -216,10 +216,10 @@ func TestLoadFromDB(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := database.UpsertSchedule(db, 400, "0 9 * * *"); err != nil {
+	if err := database.UpsertSchedule(db, 400, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpsertSchedule(db, 401, "0 10 * * *"); err != nil {
+	if err := database.UpsertSchedule(db, 401, "0 10 * * *", "0 10 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,7 +249,7 @@ func TestCronEntryRegistered(t *testing.T) {
 	s.Start()
 
 	// Use every-15-minutes (the minimum allowed interval)
-	err := s.AddSchedule(500, "*/15 * * * *")
+	err := s.AddSchedule(500, "*/15 * * * *", "*/15 * * * *")
 	if err != nil {
 		t.Fatalf("AddSchedule failed: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestAddScheduleRateLimited(t *testing.T) {
 	s.Start()
 
 	// Every minute should be rejected
-	err := s.AddSchedule(600, "* * * * *")
+	err := s.AddSchedule(600, "* * * * *", "* * * * *")
 	if err == nil {
 		t.Error("AddSchedule should reject every-minute cron")
 	}
@@ -279,9 +279,57 @@ func TestAddScheduleRateLimited(t *testing.T) {
 	}
 
 	// Every 15 minutes should be accepted
-	err = s.AddSchedule(600, "*/15 * * * *")
+	err = s.AddSchedule(600, "*/15 * * * *", "*/15 * * * *")
 	if err != nil {
 		t.Fatalf("AddSchedule should accept every-15-min cron: %v", err)
+	}
+}
+
+// --- ConvertCronToUTC tests ---
+
+func TestConvertCronToUTC(t *testing.T) {
+	tests := []struct {
+		name        string
+		expr        string
+		offsetSecs  int
+		wantExpr    string
+		wantChanged bool
+	}{
+		// ET winter: UTC-5 (offsetSecs = -18000)
+		{"ET simple hour", "0 9 * * *", -18000, "0 14 * * *", true},
+		{"ET weekdays", "0 9 * * 1-5", -18000, "0 14 * * 1-5", true},
+		{"ET two hours", "30 8,17 * * *", -18000, "30 13,22 * * *", true},
+		{"ET midnight crossing", "0 22 * * 1-5", -18000, "0 3 * * 2-6", true},
+		// PT winter: UTC-8 (offsetSecs = -28800)
+		{"PT simple hour", "0 9 * * 1-5", -28800, "0 17 * * 1-5", true},
+		// UTC: no change
+		{"UTC no-op", "0 9 * * *", 0, "0 9 * * *", false},
+		// Wildcard hour: no conversion
+		{"wildcard hour", "*/15 * * * *", -18000, "*/15 * * * *", false},
+		// Step in hour: no conversion
+		{"step hour unchanged", "0 */2 * * *", -18000, "0 */2 * * *", false},
+		// Wildcard DOW: no day shift needed
+		{"ET midnight cross wildcard dow", "0 22 * * *", -18000, "0 3 * * *", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ConvertCronToUTC(tt.expr, tt.offsetSecs)
+			if err != nil {
+				t.Fatalf("ConvertCronToUTC(%q, %d) error = %v", tt.expr, tt.offsetSecs, err)
+			}
+			if got != tt.wantExpr {
+				t.Errorf("ConvertCronToUTC(%q, %d) = %q, want %q", tt.expr, tt.offsetSecs, got, tt.wantExpr)
+			}
+		})
+	}
+}
+
+func TestConvertCronToUTCErrors(t *testing.T) {
+	// Hour values that cross different day boundaries should return the original
+	_, err := ConvertCronToUTC("0 2,22 * * *", -18000) // 2+5=7 (no cross), 22+5=27 (crosses) → inconsistent
+	if err == nil {
+		t.Error("expected error for hours crossing different day boundaries")
 	}
 }
 

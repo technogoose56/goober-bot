@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,11 +33,12 @@ CREATE TABLE IF NOT EXISTS user_config (
 
 // Schedule represents a row in the schedules table.
 type Schedule struct {
-	ID             int
-	ChatID         int64
-	CronExpression string
-	CreatedAt      string
-	LastRun        *string
+	ID                int
+	ChatID            int64
+	CronExpression    string // user's original expression (for display)
+	CronExpressionUTC string // UTC-converted expression (for scheduling)
+	CreatedAt         string
+	LastRun           *string
 }
 
 // UserConfig represents a row in the user_config table.
@@ -83,6 +85,19 @@ func Open(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to apply schema: %w", err)
 	}
 
+	// Migration: add cron_expression_utc column (added in session 4)
+	if _, err := db.Exec(`ALTER TABLE schedules ADD COLUMN cron_expression_utc TEXT`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("failed to migrate schedules schema: %w", err)
+		}
+	}
+	// Backfill: existing rows pre-date timezone conversion, so their expression is already UTC
+	if _, err := db.Exec(`UPDATE schedules SET cron_expression_utc = cron_expression WHERE cron_expression_utc IS NULL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to backfill cron_expression_utc: %w", err)
+	}
+
 	log.Println("Database initialized successfully")
 	return db, nil
 }
@@ -95,14 +110,17 @@ func Close(db *sql.DB) {
 }
 
 // UpsertSchedule inserts a new schedule or updates the existing one for the given chat.
-func UpsertSchedule(db *sql.DB, chatID int64, cronExpr string) error {
+// userExpr is the original expression in the user's timezone (for display).
+// utcExpr is the UTC-converted expression (for scheduling).
+func UpsertSchedule(db *sql.DB, chatID int64, userExpr, utcExpr string) error {
 	_, err := db.Exec(
-		`INSERT INTO schedules (chat_id, cron_expression)
-		 VALUES (?, ?)
+		`INSERT INTO schedules (chat_id, cron_expression, cron_expression_utc)
+		 VALUES (?, ?, ?)
 		 ON CONFLICT(chat_id) DO UPDATE SET
-		     cron_expression = excluded.cron_expression,
+		     cron_expression     = excluded.cron_expression,
+		     cron_expression_utc = excluded.cron_expression_utc,
 		     last_run = NULL`,
-		chatID, cronExpr,
+		chatID, userExpr, utcExpr,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to upsert schedule: %w", err)
@@ -133,9 +151,9 @@ func RemoveSchedule(db *sql.DB, chatID int64) error {
 func GetSchedule(db *sql.DB, chatID int64) (Schedule, error) {
 	var s Schedule
 	err := db.QueryRow(
-		"SELECT id, chat_id, cron_expression, created_at, last_run FROM schedules WHERE chat_id = ?",
+		"SELECT id, chat_id, cron_expression, cron_expression_utc, created_at, last_run FROM schedules WHERE chat_id = ?",
 		chatID,
-	).Scan(&s.ID, &s.ChatID, &s.CronExpression, &s.CreatedAt, &s.LastRun)
+	).Scan(&s.ID, &s.ChatID, &s.CronExpression, &s.CronExpressionUTC, &s.CreatedAt, &s.LastRun)
 
 	if err == sql.ErrNoRows {
 		return Schedule{}, fmt.Errorf("no schedule found for chat %d", chatID)
@@ -149,7 +167,7 @@ func GetSchedule(db *sql.DB, chatID int64) (Schedule, error) {
 
 // ListSchedules returns all schedules in the database.
 func ListSchedules(db *sql.DB) ([]Schedule, error) {
-	rows, err := db.Query("SELECT id, chat_id, cron_expression, created_at, last_run FROM schedules")
+	rows, err := db.Query("SELECT id, chat_id, cron_expression, cron_expression_utc, created_at, last_run FROM schedules")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list schedules: %w", err)
 	}
@@ -158,7 +176,7 @@ func ListSchedules(db *sql.DB) ([]Schedule, error) {
 	var schedules []Schedule
 	for rows.Next() {
 		var s Schedule
-		if err := rows.Scan(&s.ID, &s.ChatID, &s.CronExpression, &s.CreatedAt, &s.LastRun); err != nil {
+		if err := rows.Scan(&s.ID, &s.ChatID, &s.CronExpression, &s.CronExpressionUTC, &s.CreatedAt, &s.LastRun); err != nil {
 			return nil, fmt.Errorf("failed to scan schedule: %w", err)
 		}
 		schedules = append(schedules, s)
@@ -200,6 +218,17 @@ func GetUserConfig(db *sql.DB, chatID int64) (UserConfig, error) {
 		return UserConfig{}, fmt.Errorf("failed to get user config: %w", err)
 	}
 	return c, nil
+}
+
+// HasUserConfig returns true if the given chat has an explicitly saved config row.
+// A missing row means the user has never run /weather-config, so timezone is not configured.
+func HasUserConfig(db *sql.DB, chatID int64) (bool, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM user_config WHERE chat_id = ?", chatID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check user config: %w", err)
+	}
+	return count > 0, nil
 }
 
 // UpsertUserConfig inserts or updates the config for the given chat.

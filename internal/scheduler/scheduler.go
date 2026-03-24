@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,10 +130,12 @@ func FormatTimeInTZ(timeStr string, tzName string, tzOffsetSecs int) string {
 }
 
 // AddSchedule registers a cron job for the given chat and persists it to the database.
+// userExpr is the original expression in the user's timezone (stored for display).
+// utcExpr is the UTC-converted expression (used for scheduling).
 // If a schedule already exists for the chat, it is replaced.
-func (s *Scheduler) AddSchedule(chatID int64, cronExpr string) error {
-	// Validate first, before touching any state
-	if err := ValidateCron(cronExpr); err != nil {
+func (s *Scheduler) AddSchedule(chatID int64, userExpr, utcExpr string) error {
+	// Validate the UTC expression (what actually runs)
+	if err := ValidateCron(utcExpr); err != nil {
 		return err
 	}
 
@@ -144,8 +148,8 @@ func (s *Scheduler) AddSchedule(chatID int64, cronExpr string) error {
 		delete(s.entries, chatID)
 	}
 
-	// Add the real cron job
-	entryID, err := s.cron.AddFunc(cronExpr, func() {
+	// Add the real cron job using the UTC expression
+	entryID, err := s.cron.AddFunc(utcExpr, func() {
 		log.Printf("Cron firing for chat %d", chatID)
 		if err := s.sender(chatID); err != nil {
 			log.Printf("Failed to send scheduled weather for chat %d: %v", chatID, err)
@@ -163,8 +167,8 @@ func (s *Scheduler) AddSchedule(chatID int64, cronExpr string) error {
 	// Store the entry ID so we can remove it later
 	s.entries[chatID] = entryID
 
-	// Persist to database
-	if err := database.UpsertSchedule(s.db, chatID, cronExpr); err != nil {
+	// Persist both expressions to database
+	if err := database.UpsertSchedule(s.db, chatID, userExpr, utcExpr); err != nil {
 		// Roll back the cron entry if DB write fails
 		s.cron.Remove(entryID)
 		delete(s.entries, chatID)
@@ -172,7 +176,7 @@ func (s *Scheduler) AddSchedule(chatID int64, cronExpr string) error {
 	}
 
 	next := s.cron.Entry(entryID).Next
-	log.Printf("Added schedule for chat %d: %q, next run: %s", chatID, cronExpr, next.Format(time.RFC3339))
+	log.Printf("Added schedule for chat %d: %q (UTC: %q), next run: %s", chatID, userExpr, utcExpr, next.Format(time.RFC3339))
 	return nil
 }
 
@@ -212,8 +216,8 @@ func (s *Scheduler) LoadFromDB() error {
 	loaded := 0
 	for _, sched := range schedules {
 		chatID := sched.ChatID // capture loop variable for closure
-		cronExpr := sched.CronExpression
-		entryID, err := s.cron.AddFunc(cronExpr, func() {
+		utcExpr := sched.CronExpressionUTC
+		entryID, err := s.cron.AddFunc(utcExpr, func() {
 			log.Printf("Cron firing for chat %d", chatID)
 			if err := s.sender(chatID); err != nil {
 				log.Printf("Failed to send scheduled weather for chat %d: %v", chatID, err)
@@ -224,7 +228,7 @@ func (s *Scheduler) LoadFromDB() error {
 			}
 		})
 		if err != nil {
-			log.Printf("Failed to load schedule for chat %d (%q): %v", chatID, cronExpr, err)
+			log.Printf("Failed to load schedule for chat %d (%q): %v", chatID, utcExpr, err)
 			continue
 		}
 		s.entries[chatID] = entryID
@@ -248,4 +252,129 @@ func (s *Scheduler) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.entries)
+}
+
+// ConvertCronToUTC converts a 5-field cron expression from a local timezone to UTC.
+// offsetSecs is seconds east of UTC (e.g., ET winter = -18000, PT winter = -28800).
+// Returns the UTC expression on success. If conversion is not possible (step patterns
+// in hour field, inconsistent day boundaries), returns the original expression and an error.
+func ConvertCronToUTC(expr string, offsetSecs int) (string, error) {
+	offsetHours := offsetSecs / 3600
+	if offsetHours == 0 {
+		return expr, nil
+	}
+
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return expr, fmt.Errorf("expected 5-field cron expression, got %d fields", len(fields))
+	}
+
+	minute, hourField, dom, month, dowField := fields[0], fields[1], fields[2], fields[3], fields[4]
+
+	// Wildcard or step-based hour: interval-based, no timezone conversion needed
+	if hourField == "*" || strings.Contains(hourField, "/") {
+		return expr, nil
+	}
+
+	newHourField, dayDelta, err := convertHourField(hourField, offsetHours)
+	if err != nil {
+		return expr, fmt.Errorf("cannot convert hour field: %w", err)
+	}
+
+	newDowField := dowField
+	if dayDelta != 0 && dowField != "*" {
+		newDowField, err = shiftDowField(dowField, dayDelta)
+		if err != nil {
+			return expr, fmt.Errorf("cannot shift day-of-week: %w", err)
+		}
+	}
+
+	return strings.Join([]string{minute, newHourField, dom, month, newDowField}, " "), nil
+}
+
+// shiftHourValue converts a single local hour to UTC.
+// Returns the UTC hour and the day delta (-1, 0, or +1).
+func shiftHourValue(h, offsetHours int) (int, int) {
+	utc := h - offsetHours
+	if utc < 0 {
+		return utc + 24, -1
+	}
+	if utc >= 24 {
+		return utc - 24, +1
+	}
+	return utc, 0
+}
+
+// convertHourField converts the hour field of a cron expression from local to UTC.
+// Supports single values (9), comma-separated lists (8,17), and ranges (9-17).
+// Step patterns are handled by the caller before this is called.
+// Returns the new hour field, the day delta (consistent across all hours), and any error.
+func convertHourField(hourField string, offsetHours int) (string, int, error) {
+	// Range (e.g., "9-17") — no commas
+	if strings.Contains(hourField, "-") && !strings.Contains(hourField, ",") {
+		parts := strings.SplitN(hourField, "-", 2)
+		start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+		end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err1 != nil || err2 != nil {
+			return "", 0, fmt.Errorf("invalid hour range %q", hourField)
+		}
+		utcStart, deltaStart := shiftHourValue(start, offsetHours)
+		utcEnd, deltaEnd := shiftHourValue(end, offsetHours)
+		if deltaStart != deltaEnd {
+			return "", 0, fmt.Errorf("hour range %q crosses midnight boundary after timezone conversion", hourField)
+		}
+		return fmt.Sprintf("%d-%d", utcStart, utcEnd), deltaStart, nil
+	}
+
+	// Single value or comma-separated list
+	parts := strings.Split(hourField, ",")
+	dayDelta := 0
+	utcParts := make([]string, 0, len(parts))
+	for i, p := range parts {
+		h, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid hour value %q", p)
+		}
+		utcH, delta := shiftHourValue(h, offsetHours)
+		utcParts = append(utcParts, strconv.Itoa(utcH))
+		if i == 0 {
+			dayDelta = delta
+		} else if delta != dayDelta {
+			return "", 0, fmt.Errorf("hour values in %q cross different day boundaries after timezone conversion", hourField)
+		}
+	}
+	return strings.Join(utcParts, ","), dayDelta, nil
+}
+
+// shiftDowField shifts the day-of-week field by delta (-1 or +1).
+// Supports single values (1), comma-separated lists (1,3,5), and ranges (1-5).
+func shiftDowField(dowField string, delta int) (string, error) {
+	// Range (e.g., "1-5") — no commas
+	if strings.Contains(dowField, "-") && !strings.Contains(dowField, ",") {
+		parts := strings.SplitN(dowField, "-", 2)
+		start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+		end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err1 != nil || err2 != nil {
+			return "", fmt.Errorf("invalid dow range %q", dowField)
+		}
+		newStart := ((start + delta) % 7 + 7) % 7
+		newEnd := ((end + delta) % 7 + 7) % 7
+		if newStart > newEnd {
+			return "", fmt.Errorf("day-of-week range %q wraps around after shift", dowField)
+		}
+		return fmt.Sprintf("%d-%d", newStart, newEnd), nil
+	}
+
+	// Single value or comma-separated
+	parts := strings.Split(dowField, ",")
+	newParts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		d, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return "", fmt.Errorf("invalid dow value %q", p)
+		}
+		newD := ((d + delta) % 7 + 7) % 7
+		newParts = append(newParts, strconv.Itoa(newD))
+	}
+	return strings.Join(newParts, ","), nil
 }

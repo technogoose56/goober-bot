@@ -472,12 +472,15 @@ func TestRecurringWeatherShowsTimezone(t *testing.T) {
 func TestRecurringWeatherDefaultTimezone(t *testing.T) {
 	deps, mock := newTestDeps(t)
 
-	// No timezone configured -> should use default ET
+	// No timezone configured -> should treat cron as UTC and show a notice
 	handleRecurringWeather("/recurring-weather 0 9 * * *", 1700, deps)
 
 	last := mock.lastMessage()
-	if !containsStr(last, "ET") {
-		t.Errorf("recurring weather confirmation should show default timezone 'ET', got: %s", last)
+	if !containsStr(last, "UTC") {
+		t.Errorf("recurring weather confirmation should show UTC when no timezone is set, got: %s", last)
+	}
+	if !containsStr(last, "timezone") {
+		t.Errorf("recurring weather confirmation should show a timezone setup notice, got: %s", last)
 	}
 }
 

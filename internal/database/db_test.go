@@ -23,7 +23,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	db := openTestDB(t)
 
 	// Verify the schedules table exists by querying it
-	_, err := db.Query("SELECT id, chat_id, cron_expression, created_at, last_run FROM schedules")
+	_, err := db.Query("SELECT id, chat_id, cron_expression, cron_expression_utc, created_at, last_run FROM schedules")
 	if err != nil {
 		t.Fatalf("schedules table not created: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 func TestUpsertScheduleInsert(t *testing.T) {
 	db := openTestDB(t)
 
-	err := UpsertSchedule(db, 100, "0 9 * * 1-5")
+	err := UpsertSchedule(db, 100, "0 9 * * 1-5", "0 9 * * 1-5")
 	if err != nil {
 		t.Fatalf("UpsertSchedule failed: %v", err)
 	}
@@ -56,12 +56,12 @@ func TestUpsertScheduleUpdate(t *testing.T) {
 	db := openTestDB(t)
 
 	// Insert initial schedule
-	if err := UpsertSchedule(db, 200, "0 9 * * 1-5"); err != nil {
+	if err := UpsertSchedule(db, 200, "0 9 * * 1-5", "0 9 * * 1-5"); err != nil {
 		t.Fatalf("initial insert failed: %v", err)
 	}
 
 	// Update with new cron expression
-	if err := UpsertSchedule(db, 200, "0 8 * * *"); err != nil {
+	if err := UpsertSchedule(db, 200, "0 8 * * *", "0 13 * * *"); err != nil {
 		t.Fatalf("upsert update failed: %v", err)
 	}
 
@@ -71,6 +71,9 @@ func TestUpsertScheduleUpdate(t *testing.T) {
 	}
 	if s.CronExpression != "0 8 * * *" {
 		t.Errorf("CronExpression = %q, want %q", s.CronExpression, "0 8 * * *")
+	}
+	if s.CronExpressionUTC != "0 13 * * *" {
+		t.Errorf("CronExpressionUTC = %q, want %q", s.CronExpressionUTC, "0 13 * * *")
 	}
 
 	// Verify only one row exists for this chat
@@ -93,7 +96,7 @@ func TestUpsertScheduleResetsLastRun(t *testing.T) {
 	db := openTestDB(t)
 
 	// Insert and set last_run
-	if err := UpsertSchedule(db, 300, "0 9 * * *"); err != nil {
+	if err := UpsertSchedule(db, 300, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
 	if err := UpdateLastRun(db, 300, time.Now()); err != nil {
@@ -107,7 +110,7 @@ func TestUpsertScheduleResetsLastRun(t *testing.T) {
 	}
 
 	// Upsert with new expression should reset last_run
-	if err := UpsertSchedule(db, 300, "0 10 * * *"); err != nil {
+	if err := UpsertSchedule(db, 300, "0 10 * * *", "0 15 * * *"); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = GetSchedule(db, 300)
@@ -119,7 +122,7 @@ func TestUpsertScheduleResetsLastRun(t *testing.T) {
 func TestRemoveSchedule(t *testing.T) {
 	db := openTestDB(t)
 
-	if err := UpsertSchedule(db, 400, "0 9 * * *"); err != nil {
+	if err := UpsertSchedule(db, 400, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,13 +167,13 @@ func TestListSchedules(t *testing.T) {
 	}
 
 	// Add some schedules
-	if err := UpsertSchedule(db, 500, "0 9 * * *"); err != nil {
+	if err := UpsertSchedule(db, 500, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpsertSchedule(db, 501, "0 10 * * *"); err != nil {
+	if err := UpsertSchedule(db, 501, "0 10 * * *", "0 10 * * *"); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpsertSchedule(db, 502, "0 9 * * *"); err != nil {
+	if err := UpsertSchedule(db, 502, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -187,10 +190,10 @@ func TestDuplicateCronExpressionsAllowed(t *testing.T) {
 	db := openTestDB(t)
 
 	// Two different chats with the same cron expression should both succeed
-	if err := UpsertSchedule(db, 600, "0 9 * * 1-5"); err != nil {
+	if err := UpsertSchedule(db, 600, "0 9 * * 1-5", "0 9 * * 1-5"); err != nil {
 		t.Fatalf("first insert failed: %v", err)
 	}
-	if err := UpsertSchedule(db, 601, "0 9 * * 1-5"); err != nil {
+	if err := UpsertSchedule(db, 601, "0 9 * * 1-5", "0 9 * * 1-5"); err != nil {
 		t.Fatalf("second insert with same cron should succeed but failed: %v", err)
 	}
 
@@ -206,7 +209,7 @@ func TestDuplicateCronExpressionsAllowed(t *testing.T) {
 func TestUpdateLastRun(t *testing.T) {
 	db := openTestDB(t)
 
-	if err := UpsertSchedule(db, 700, "0 9 * * *"); err != nil {
+	if err := UpsertSchedule(db, 700, "0 9 * * *", "0 9 * * *"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -327,6 +330,35 @@ func TestUpsertUserConfigUpdate(t *testing.T) {
 	// State should still be NY
 	if got.State != "NY" {
 		t.Errorf("State = %q, want %q", got.State, "NY")
+	}
+}
+
+func TestHasUserConfigFalseWhenMissing(t *testing.T) {
+	db := openTestDB(t)
+
+	has, err := HasUserConfig(db, 9999)
+	if err != nil {
+		t.Fatalf("HasUserConfig failed: %v", err)
+	}
+	if has {
+		t.Error("HasUserConfig should return false for unconfigured chat")
+	}
+}
+
+func TestHasUserConfigTrueAfterUpsert(t *testing.T) {
+	db := openTestDB(t)
+
+	cfg := UserConfig{ChatID: 9998, StationCode: "KJFK", City: "New York", State: "NY", TimezoneName: "ET", TimezoneOffset: -18000}
+	if err := UpsertUserConfig(db, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := HasUserConfig(db, 9998)
+	if err != nil {
+		t.Fatalf("HasUserConfig failed: %v", err)
+	}
+	if !has {
+		t.Error("HasUserConfig should return true after UpsertUserConfig")
 	}
 }
 

@@ -2,9 +2,11 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -15,6 +17,13 @@ import (
 	"goober-bot/internal/scheduler"
 	"goober-bot/internal/weather"
 )
+
+//go:embed VERSION
+var version string
+
+func init() {
+	version = strings.TrimSpace(version)
+}
 
 const dbPath = "./data/schedules.db"
 
@@ -30,7 +39,7 @@ func main() {
 	}
 
 	bot.Debug = true
-	log.Printf("Authorized on account %s", bot.Self.UserName)
+	log.Printf("Goober Bot v%s authorized on account %s", version, bot.Self.UserName)
 
 	// Initialize database
 	db, err := database.Open(dbPath)
