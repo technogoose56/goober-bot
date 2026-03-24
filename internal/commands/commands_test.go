@@ -509,6 +509,45 @@ func TestWeatherScheduleShowsTimezone(t *testing.T) {
 	}
 }
 
+func TestTimezoneUpdateReschedulesExistingSchedule(t *testing.T) {
+	deps, mock := newTestDeps(t)
+
+	const chatID = 1900
+
+	// Create schedule WITHOUT timezone configured — stored UTC expr = original expr.
+	handleRecurringWeather("/recurring-weather 0 9 * * 1-5", chatID, deps)
+
+	sched, err := database.GetSchedule(deps.DB, chatID)
+	if err != nil {
+		t.Fatalf("schedule not created: %v", err)
+	}
+	if sched.CronExpressionUTC != "0 9 * * 1-5" {
+		t.Fatalf("precondition: CronExpressionUTC = %q, want %q", sched.CronExpressionUTC, "0 9 * * 1-5")
+	}
+
+	// Now set timezone ET -5.
+	handleWeatherConfig("/weather-config timezone ET -5", chatID, deps)
+
+	last := mock.lastMessage()
+	if !containsStr(last, "ET") {
+		t.Errorf("timezone confirmation should mention ET, got: %s", last)
+	}
+
+	// The stored UTC expression should now be converted to 14:00 UTC (9am ET = 14:00 UTC).
+	sched, err = database.GetSchedule(deps.DB, chatID)
+	if err != nil {
+		t.Fatalf("schedule missing after timezone update: %v", err)
+	}
+	if sched.CronExpressionUTC != "0 14 * * 1-5" {
+		t.Errorf("CronExpressionUTC after timezone update = %q, want %q", sched.CronExpressionUTC, "0 14 * * 1-5")
+	}
+
+	// The confirmation message should include the updated next-run time in ET, not 4am.
+	if !containsStr(last, "9:00 AM") {
+		t.Errorf("timezone confirmation should show 9:00 AM ET next run, got: %s", last)
+	}
+}
+
 func containsStr(s, sub string) bool {
 	for i := 0; i <= len(s)-len(sub); i++ {
 		if s[i:i+len(sub)] == sub {

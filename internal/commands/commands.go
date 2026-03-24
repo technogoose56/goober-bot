@@ -130,7 +130,8 @@ func handleWeatherSchedule(chatID int64, deps Deps) {
 	sched, err := database.GetSchedule(deps.DB, chatID)
 	if err != nil {
 		reply(chatID, deps.Bot,
-			"No active schedule found.\n\nUse /recurring-weather <cron> to set one.\nExample: /recurring-weather 0 9 * * 1-5")
+			"No active schedule found.\n\nUse /recurring-weather <cron> to set one.\nExample: /recurring-weather 0 9 * * 1-5"+
+				"\nSee https://crontab.guru/ for help with cron syntax.")
 		return
 	}
 
@@ -278,7 +279,20 @@ func handleWeatherConfig(text string, chatID int64, deps Deps) {
 			reply(chatID, deps.Bot, fmt.Sprintf("Failed to save config: %v", err))
 			return
 		}
-		reply(chatID, deps.Bot, fmt.Sprintf("Timezone set to %s (UTC%+.0f).", tzName, offsetHours))
+
+		// Re-convert any existing schedule to the new timezone so next-run times stay accurate.
+		scheduleNotice := ""
+		if sched, err := database.GetSchedule(deps.DB, chatID); err == nil {
+			newUTCExpr, convErr := scheduler.ConvertCronToUTC(sched.CronExpression, offsetSecs)
+			if convErr == nil {
+				if addErr := deps.Scheduler.AddSchedule(chatID, sched.CronExpression, newUTCExpr); addErr == nil {
+					nextStr, _ := scheduler.FormatNextRun(newUTCExpr, tzName, offsetSecs)
+					scheduleNotice = fmt.Sprintf("\nExisting schedule %q updated. Next run: %s", sched.CronExpression, nextStr)
+				}
+			}
+		}
+
+		reply(chatID, deps.Bot, fmt.Sprintf("Timezone set to %s (UTC%+.0f).%s", tzName, offsetHours, scheduleNotice))
 
 	default:
 		reply(chatID, deps.Bot, weatherConfigUsage)
