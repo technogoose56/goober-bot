@@ -22,3 +22,8 @@ Keep the following core values in mind when developing the project.
 
 # Testing
 Run `go test ./...` from the root project directory and verify all tests pass.
+
+# Versioning
+This project is semantically versioned and controlled via the VERSION file.
+It should be updated as the core project files are updated.
+There is also a CHANGELOG.md for keeping track of changes.

@@ -4,11 +4,13 @@ WORKDIR /src
 
 # Cache dependency downloads
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Build a statically-linked binary
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /goober-bot .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /goober-bot .
 
 # ---
 FROM scratch
