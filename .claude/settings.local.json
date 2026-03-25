@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(go test:*)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(git -C c:/code_stuff/repos/goober-bot remote get-url origin)"
     ]
   }
 }
