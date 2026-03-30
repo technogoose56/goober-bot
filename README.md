@@ -2,6 +2,8 @@ Goober Bot - Telegram Bot
 
 A Telegram bot built with Go that provides weather updates and scheduled weather reports. Users can configure their own weather station, city, state, and timezone.
 
+This project was created leveraging Claude Code.
+
 ## Setup
 
 1. Get a bot token from [@BotFather](https://t.me/BotFather) on Telegram
